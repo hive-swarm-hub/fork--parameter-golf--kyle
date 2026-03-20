@@ -83,8 +83,6 @@ class Hyperparameters:
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 1.0))
 
-    ema_decay = float(os.environ.get("EMA_DECAY", 0.999))
-
 # -----------------------------
 # MUON OPTIMIZER
 # -----------------------------
@@ -965,10 +963,6 @@ def main() -> None:
         )
         optimizers.insert(1, optimizer_head)
 
-    # EMA shadow weights
-    ema_decay = args.ema_decay
-    ema_state = {name: tensor.detach().clone() for name, tensor in base_model.state_dict().items()}
-
     n_params = sum(p.numel() for p in base_model.parameters())
     log0(f"model_params:{n_params}")
     log0(f"world_size:{world_size} grad_accum_steps:{grad_accum_steps}")
@@ -983,7 +977,7 @@ def main() -> None:
         f"iterations:{args.iterations} warmup_steps:{args.warmup_steps} "
         f"max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
     )
-    log0(f"seed:{args.seed} ema_decay:{ema_decay} grad_clip:{args.grad_clip_norm}")
+    log0(f"seed:{args.seed} grad_clip:{args.grad_clip_norm}")
 
     # -----------------------------
     # DATA LOADER & MODEL WARMUP
@@ -1033,9 +1027,6 @@ def main() -> None:
         if distributed:
             model.require_backward_grad_sync = True
         train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
-        # Reset EMA to initial weights
-        ema_state = {name: tensor.detach().clone() for name, tensor in base_model.state_dict().items()}
-
     # -----------------------------
     # MAIN TRAINING LOOP
     # -----------------------------
@@ -1101,11 +1092,6 @@ def main() -> None:
             opt.step()
         zero_grad_all()
 
-        # Update EMA
-        with torch.no_grad():
-            for name, param in base_model.state_dict().items():
-                ema_state[name].mul_(ema_decay).add_(param, alpha=1.0 - ema_decay)
-
         step += 1
         approx_training_time_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         should_log_train = (
@@ -1134,9 +1120,6 @@ def main() -> None:
     # -----------------------------
     # SERIALIZATION + ROUNDTRIP VALIDATION
     # -----------------------------
-
-    # Load EMA weights for final evaluation
-    base_model.load_state_dict(ema_state, strict=True)
 
     if master_process:
         torch.save(base_model.state_dict(), "final_model.pt")
